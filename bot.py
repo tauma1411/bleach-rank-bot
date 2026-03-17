@@ -2,12 +2,14 @@ import discord
 from discord.ext import commands
 import json
 import os
+import time
 
 TOKEN = os.getenv("TOKEN")
 
 intents = discord.Intents.default()
 intents.message_content = True
 intents.presences = True
+intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -116,6 +118,38 @@ image_files = {
     "Yhwach": "yhwach.png"
 }
 
+XP_PER_MESSAGE = 20
+XP_PER_HOUR_IN_MATCH = 50
+
+MATCH_KEYWORDS = [
+    "in match",
+    "in game",
+    "in-game",
+    "match in progress",
+    "competitive",
+    "ranked",
+    "playing match",
+    "em partida",
+    "na partida",
+    "partida em andamento"
+]
+
+NON_MATCH_KEYWORDS = [
+    "lobby",
+    "menu",
+    "main menu",
+    "queue",
+    "fila",
+    "matchmaking",
+    "looking for match",
+    "carregando",
+    "loading",
+    "party",
+    "sala"
+]
+
+active_matches = {}
+
 def load_data():
     if not os.path.exists("database.json"):
         return {}
@@ -145,6 +179,72 @@ def get_next_xp(level):
         return xp_levels[level + 1]
     return None
 
+def get_activity_text(member):
+    if not member.activities:
+        return ""
+
+    texts = []
+    for activity in member.activities:
+        parts = []
+
+        name = getattr(activity, "name", None)
+        details = getattr(activity, "details", None)
+        state = getattr(activity, "state", None)
+
+        if name:
+            parts.append(str(name))
+        if details:
+            parts.append(str(details))
+        if state:
+            parts.append(str(state))
+
+        if parts:
+            texts.append(" | ".join(parts))
+
+    return " ".join(texts).lower()
+
+def is_real_match(member):
+    if not member.activities:
+        return False
+
+    activity_text = get_activity_text(member)
+
+    if not activity_text:
+        return False
+
+    for bad in NON_MATCH_KEYWORDS:
+        if bad in activity_text:
+            return False
+
+    for good in MATCH_KEYWORDS:
+        if good in activity_text:
+            return True
+
+    return False
+
+def add_xp(user_id, amount):
+    data = load_data()
+
+    if user_id not in data:
+        data[user_id] = {"xp": 0}
+
+    data[user_id]["xp"] += amount
+    save_data(data)
+
+def finish_match_for_user(user_id):
+    if user_id not in active_matches:
+        return 0
+
+    start_time = active_matches[user_id]
+    elapsed_seconds = time.time() - start_time
+    del active_matches[user_id]
+
+    xp_gained = int((elapsed_seconds / 3600) * XP_PER_HOUR_IN_MATCH)
+    if xp_gained > 0:
+        add_xp(user_id, xp_gained)
+
+    return xp_gained
+
 @bot.event
 async def on_ready():
     print(f"Bot conectado como {bot.user}")
@@ -154,16 +254,29 @@ async def on_message(message):
     if message.author.bot:
         return
 
-    data = load_data()
+    if message.content.startswith("!"):
+        await bot.process_commands(message)
+        return
+
     user_id = str(message.author.id)
-
-    if user_id not in data:
-        data[user_id] = {"xp": 0}
-
-    data[user_id]["xp"] += 20
-    save_data(data)
+    add_xp(user_id, XP_PER_MESSAGE)
 
     await bot.process_commands(message)
+
+@bot.event
+async def on_presence_update(before, after):
+    user_id = str(after.id)
+
+    before_match = is_real_match(before)
+    after_match = is_real_match(after)
+
+    if not before_match and after_match:
+        active_matches[user_id] = time.time()
+
+    elif before_match and not after_match:
+        xp_gained = finish_match_for_user(user_id)
+        if xp_gained > 0:
+            print(f"{after.name} ganhou {xp_gained} XP por tempo em partida.")
 
 @bot.command()
 async def rank(ctx):
@@ -208,5 +321,47 @@ async def rank(ctx):
             return
 
     await ctx.send(embed=embed)
+
+@bot.command()
+async def matchstatus(ctx):
+    user_id = str(ctx.author.id)
+
+    if user_id in active_matches:
+        elapsed_seconds = time.time() - active_matches[user_id]
+        minutes = int(elapsed_seconds // 60)
+        estimated_xp = int((elapsed_seconds / 3600) * XP_PER_HOUR_IN_MATCH)
+        await ctx.send(f"Você está em partida há {minutes} minuto(s). XP estimado até agora: {estimated_xp}.")
+    else:
+        await ctx.send("No momento você não está em uma partida reconhecida pelo bot.")
+
+@bot.command()
+async def comandos(ctx):
+    embed = discord.Embed(
+        title="Comandos do BleachRankBot",
+        description="Veja o que eu posso fazer no servidor.",
+        color=0x5865F2
+    )
+
+    embed.add_field(
+        name="!rank",
+        value="Mostra seu personagem atual, XP, próxima habilidade e imagem do personagem.",
+        inline=False
+    )
+    embed.add_field(
+        name="!matchstatus",
+        value="Mostra se você está em uma partida reconhecida pelo bot e o XP estimado.",
+        inline=False
+    )
+    embed.add_field(
+        name="!comandos",
+        value="Mostra a lista de comandos disponíveis.",
+        inline=False
+    )
+
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def ajuda(ctx):
+    await comandos(ctx)
 
 bot.run(TOKEN)
